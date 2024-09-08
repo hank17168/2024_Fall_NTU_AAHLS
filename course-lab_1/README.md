@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # course-lab_1
 Board: PYNQ-Z2, Vitis version: 2022.1 <br />
 PYNQ-Z2 SD card image: v2.7 
