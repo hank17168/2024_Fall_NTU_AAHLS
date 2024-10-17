@@ -65,11 +65,14 @@ reg r_rvalid;	// data    read  valid
 reg r_wready;	// data    write ready
 // -------------- Configuration Register control ---------------
 // 0x00 => bit 0: ap_start, bit 1: ap_done, bit 2: ap_idle
-wire [2:0]  ap_ctrl;   
+wire [2:0]  ap_ctrl;
+wire [(pADDR_WIDTH-1):0] awaddr_revise;
+wire [(pADDR_WIDTH-1):0] araddr_revise;   
 reg  [1:0]  ap_state;
 reg  [1:0]  next_ap_state;
 reg  [31:0] data_length; // 0x10-14: data length
-reg  [5:0]  init_addr;   // data RAM initialize
+reg  [3:0]  data_addr_offset;   // data RAM initialize
+reg         init_done;
 reg  [9:0]  tlast_cnt;   // count to data length 600
 reg  [4:0]  out_cnt;       
 // ---------------- FIR -------------------
@@ -138,23 +141,38 @@ always@(posedge axis_clk , negedge axis_rst_n) begin
 	    data_length <= data_length;
 end
 //------------------------- tap / Data RAM signals ----------------------------- // 0x20-FF: tap parameter
+assign awaddr_revise = (awaddr < 12'h80)? awaddr - 12'h20 : awaddr;
 assign tap_EN = 1;
 assign tap_WE = ((wvalid == 1) && (awaddr[7:0] != 0))? 4'b1111 : 4'b0000;
-assign tap_A  = (ap_ctrl[2] == 1 && (wvalid == 1 || wready == 1))? awaddr[5:0] : tap_AR[5:0];
+assign tap_A  = (ap_ctrl[2] == 1 && (wvalid == 1 || wready == 1))? {6'd0,awaddr_revise[5:0]} : tap_AR[5:0];
 assign tap_Di = wdata;
  
 assign data_EN = 1;
-assign data_WE = (ss_tready || init_addr != 6'd44)? 4'b1111 : 4'b0000;	// if ss_tlast not asserted, still can write
-assign data_A  = (ap_ctrl[2] == 1 && init_addr != 6'd44)? init_addr : data_AR;	// data initialize before ap_start
-assign data_Di = (ap_ctrl[2] == 1 && init_addr != 6'd44)? 0 : ss_tdata;				// 44 => 11-tap data 
+assign data_WE = (ss_tready || init_done == 0)? 4'b1111 : 4'b0000;	// if ss_tlast not asserted, still can write
+assign data_A  = (ap_ctrl[2] == 1 && init_done == 1)? 4*data_addr_offset : data_AR;	// data initialize before ap_start
+assign data_Di = (ap_ctrl[2] == 1 && init_done == 0)? 0 : ss_tdata;				// 44 => 11-tap data 
 
 always @(posedge axis_clk or negedge axis_rst_n) begin
-	if (!axis_rst_n) 
-		init_addr <= 6'd0;
-	else if(init_addr == 6'd44)
-		init_addr <= init_addr;
+	if (!axis_rst_n) begin
+		data_addr_offset <= 4'd0;
+	end
+	else if (data_addr_offset == 4'd11 && init_done == 0)
+		data_addr_offset <= data_addr_offset;
+	else if (ap_ctrl[2] && init_done == 1)
+	    data_addr_offset <= 4'd10;
+	else if (ap_ctrl[2] == 0)
+	    data_addr_offset <= (data_addr_offset != 4'd10)? data_addr_offset+1 : 4'd0;
 	else
-	    init_addr <= init_addr + 4;
+	    data_addr_offset <= data_addr_offset + 1;
+end
+
+always @(posedge axis_clk or negedge axis_rst_n) begin
+	if (!axis_rst_n)
+		init_done <= 1'd0;
+	else if(ap_ctrl[2] == 1 && data_addr_offset == 4'd11)
+		init_done <= 1'd1;
+	else
+	    init_done <= init_done;
 end
 
 //-------------- data length ------------------
@@ -202,9 +220,14 @@ always@(posedge axis_clk or negedge axis_rst_n) begin
 end
 
 //------------ FIR ---------------
-
 always @(posedge axis_clk or negedge axis_rst_n) begin
 	if (!axis_rst_n) begin
+		h <= 32'd0;
+		x <= 32'd0;
+		m <= 32'd0;
+		y <= 32'd0;
+	end
+	else if (ap_ctrl[2] ==1) begin
 		h <= 32'd0;
 		x <= 32'd0;
 		m <= 32'd0;
@@ -219,19 +242,11 @@ always @(posedge axis_clk or negedge axis_rst_n) begin
 end
 
 //---------------------- Address ----------------------
-always @(posedge axis_clk or negedge axis_rst_n) begin
-	if (!axis_rst_n)
-		k <= 4'd10;
-	else if(ap_ctrl[2])
-		k <= 4'd10;
-	else
-		k <= (k != 4'd10)? k+1 : 4'd0;
-end
-
-assign tap_AR = (ap_ctrl[2] == 1'b0)? 4 * k : araddr[5:0];
+assign araddr_revise = (araddr < 12'h80)? araddr - 12'h20 : araddr;
+assign tap_AR = (ap_ctrl[2] == 1'b0)? 4 * data_addr_offset : {6'd0,araddr_revise[5:0]};
 
 always@(*) begin
-    if (ap_state != AP_IDLE && k == 10)
+    if (ap_state != AP_IDLE && data_addr_offset == 10)
         x_cnt_tmp = (x_cnt != 10) ? x_cnt + 1 : 0;
     else
         x_cnt_tmp = x_cnt;
@@ -244,12 +259,12 @@ always @(posedge axis_clk or negedge axis_rst_n) begin
 		x_cnt <= x_cnt_tmp;
 end
 
-assign data_AR = (k <= x_cnt)? 4 * (x_cnt - k) : 4 * (11 + x_cnt - k); // x[t-i]
+assign data_AR = (data_addr_offset <= x_cnt)? 4 * (x_cnt - data_addr_offset) : 4 * (11 + x_cnt - data_addr_offset); // x[t-i]
 
 //---------------------- AXI-Stream ---------------------------
 // tvalid is driven by master / tready is driven by tslave
 // Stream-in X
-assign ss_tready = (ap_ctrl[2] == 0 && init_addr == 6'd44 && k == 4'd0)? 1'b1 : 1'b0;
+assign ss_tready = (ap_ctrl[2] == 0 && init_done == 1 && data_addr_offset == 4'd0)? 1'b1 : 1'b0;
 // Stream-out Y
 assign sm_tvalid = (fir_state == FIR_DONE)? 1'b1 : 1'b0;
 assign sm_tdata  = y;
