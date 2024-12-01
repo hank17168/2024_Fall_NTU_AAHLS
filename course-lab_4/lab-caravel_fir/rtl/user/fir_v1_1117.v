@@ -227,7 +227,7 @@ module fir
     
 //------------------------- data_RAM signals -----------------------------
     assign data_EN = 1;
-    assign data_WE = (( ss_tvalid && ss_tready && (awaddr[7:0] == 8'h80)) && (sm_check != 1)
+    assign data_WE = (( ss_tvalid && ss_tready && (awaddr[7:0] == 8'h80)) 
                   || (init_addr != 6'd44))? 4'b1111 : 4'b0000;  // if ss_tlast not asserted, still can write
     assign data_A  = (init_addr != 6'd44)? init_addr : data_A_tmp; // data initialize before ap_start
     assign data_Di = (init_addr != 6'd44)? 0 : ss_tdata;
@@ -248,7 +248,7 @@ module fir
     assign ss_tready = (ap_ctrl[2] == 0 && init_addr == 6'd44 && (awaddr[7:0] == 8'h80))? 1 : 0;
     
 //-------------------- Stream-out Y -----------------------//
-    assign sm_tvalid = (y_cnt == 5'd0 && ap_ctrl[2] == 0 && sm_check >= 3)? 1'b1 : 1'b0; // new 1117 // new 1128
+    assign sm_tvalid = (y_cnt == 5'd0 && ap_ctrl[2] == 0 && sm_check == 4)? 1'b1 : 1'b0; // new 1117
     assign sm_tdata  = y;                               // data after calculation Y[t]
     assign sm_tlast  = _sm_tlast; 
 
@@ -291,21 +291,19 @@ module fir
     always @* begin
         if (ss_tready) begin
             if (ss_tvalid) // If fir is ready for new data in
-                //y_cnt_tmp = y_cnt + 1'b1;
-                y_cnt_tmp = - 6'd10;
+                y_cnt_tmp = y_cnt + 1'b1;
             else
                 y_cnt_tmp = y_cnt;
         end
         else if (y_cnt == 0) begin
             if (sm_tvalid && sm_tready) // If firmware send the signal for Y output request
                 //y_cnt_tmp = 0 - 6'd14;
-		//y_cnt_tmp = 0 - 6'd10;
-		y_cnt_tmp = 6'd1;
+		y_cnt_tmp = 0 - 6'd10;
             else
                 y_cnt_tmp = y_cnt;
         end
         else begin
-            	y_cnt_tmp = y_cnt + 1'b1;
+            y_cnt_tmp = y_cnt + 1'b1;
         end
     end
     
@@ -342,27 +340,11 @@ module fir
             y <= 32'd0;
         end
         else begin
-            //h <= h_tmp;
-            //x <= x_tmp;
-            if (ss_tready)
-            	x <= 0;
-            else 
-            	x <= x_tmp;
-            	
-            if (ss_tready)
-            	h <= 0;
-            else 
-            	h <= h_tmp;
-            	
-            if (ss_tready)
-            	m <= 0;
-            else 
-            	m <= m_tmp;
-            	
+            h <= h_tmp;
+            x <= x_tmp;
+            m <= m_tmp;
             if (sm_tready && sm_tvalid)
                 y <= 0;
-            else if (ss_tready && ss_tvalid) //NEW 1127
-            	y <= 0;
             else if(y_cnt == - 6'd10)
             	y <= 0;
             else
@@ -373,8 +355,7 @@ module fir
 //---------------------- Address Generator ----------------------   
     always @* begin
         if (ss_tvalid && ss_tready) begin
-            //k_tmp = k + 1;
-            k_tmp = 0;
+            k_tmp = k + 1;
 	end
         else if (y_cnt == 0) begin
             if (sm_tvalid && sm_tready) // if output y, then k = 0
@@ -386,7 +367,7 @@ module fir
 	    k_tmp = 0;
 	end
         else begin
-            k_tmp = k  + 1;
+            k_tmp = k + 1;
         end
     end
     

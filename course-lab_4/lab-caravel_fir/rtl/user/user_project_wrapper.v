@@ -1,4 +1,3 @@
-`timescale 1ns / 1ps
 // SPDX-FileCopyrightText: 2020 Efabless Corporation
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -29,7 +28,6 @@
  *
  *-------------------------------------------------------------
  */
-`define MPRJ_IO_PADS 38
 
 module user_project_wrapper #(
     parameter BITS = 32
@@ -80,37 +78,152 @@ module user_project_wrapper #(
     output [2:0] user_irq
 );
 
-    wire        usr_decode; // If MPRJ_addr = 0x3800_0000
-    wire        fir_decode; // If MPRJ_addr = 0x3000_0000
-    wire        fir_strin;
-    wire        fir_strout;
+
+
+
+//------------------------ADDRESS DECODE--------------------------------
+    wire mem_star;
+    wire fir_addr;
+    wire stream_in;
+    wire stream_out;
+
+    assign mem_star = (wbs_adr_i[31: 16] == 16'h3800)? 1'b1 : 1'b0;
+    assign fir_addr = (wbs_adr_i[31: 16] == 16'h3000)? 1'b1 : 1'b0;
+    //stream in out
+    assign stream_in  = (wbs_adr_i[15: 0] == 16'h0080)? 1'b1 : 1'b0;
+    assign stream_out = (wbs_adr_i[15: 0] == 16'h0084)? 1'b1 : 1'b0; 
+
+
+//--------------------------WB-AXI--------------------------------------
+//WB-AXILITE
+
+    wire         awready;
+    wire         wready;
+    wire         awvalid;
+    wire [31 :0] awaddr;
+    wire         wvalid;
+    wire [31 :0] wdata;
+    wire         arready;
+    wire         rready;
+    wire         arvalid;
+    wire [31 :0] araddr;
+    wire         rvalid;
+    wire [31 :0] rdata;
+    wire [31: 0] wbs_r_dat;
+    wire         wbs_r_ack;
+    wire         wbs_w_ack;
+    wire         wbs_si_ack;
+    wire         wbs_so_ack;
+    wire [31: 0] wbs_so_dat;
+    wire [31: 0] wbs_si_dat;
+
+//----------------------------------------------------------------------
+//                             read protocol
+//-----------------------------------------------------------------------
+//  Master 提供 ARADDR 並置位 ARVALID，Slave 確認準備好接收請求時置位 ARREADY
+//  當 ARVALID 和 ARREADY 同時為高時握手完成，Master 和 Slave 鎖定位址
+//  Slave 傳送數據（RDATA）並置位 RVALID, 當master 確認準備好接收數據時置位 RREADY
+//  當 RVALID 和 RREADY 同時為高時握手完成，數據傳輸到 Master
+//----------------------------------------------------------------------
+
+    assign arvalid = fir_addr && wbs_cyc_i && wbs_stb_i && (!wbs_we_i);
+    assign rready = fir_addr && wbs_cyc_i && wbs_stb_i && (!wbs_we_i);
+    assign araddr = wbs_adr_i;
+    //read ack
+    assign wbs_r_ack = rvalid && rready;
+    //read data,從output rdata中把data存到wbs_dat_o
+    assign wbs_r_dat = rdata; 
+
+//----------------------------------------------------------------------
+//                             write protocol
+//----------------------------------------------------------------------
+//  AWADDR	Master	要寫入的目標位址
+//  AWVALID	Master	指示 AWADDR 有效
+//  AWREADY	Slave	指示 Slave 準備接收位址
+//  WDATA	Master	要寫入的數據
+//  WVALID	Master	指示 WDATA 有效
+//  WREADY	Slave	指示 Slave 準備接收數據
+//-----------------------------------------------------------------------
+
+    assign awvalid = fir_addr && wbs_cyc_i && wbs_stb_i && wbs_we_i && (!stream_in) && (!stream_out);
+    assign wdata   = wbs_dat_i;
+    assign wvalid  = fir_addr && wbs_cyc_i && wbs_stb_i && wbs_we_i && (!stream_in) && (!stream_out);
+    assign awaddr  = wbs_adr_i;
+    //write ack
+    assign wbs_w_ack = wready && wvalid;
+    //write data,把input wdata連到wbs_dat_i
+    assign wdata = wbs_dat_i;
+
+//WB-AXISTREAM
     
-//  AXI-Lite Interaface
-    wire        awready;
-    wire        wready; 
-    wire        awvalid;
-    wire [31:0] awaddr; 
-    wire        wvalid; 
-    wire [31:0] wdata;  
-    wire        arready;
-    wire        rready;
-    wire        arvalid;
-    wire [31:0] araddr;
-    wire        rvalid;
-    wire [31:0] rdata;
+    wire           ss_tvalid;
+    wire [31 :0]   ss_tdata;
+    wire           ss_tlast; 
+    wire           ss_tready; 
+    wire           sm_tready; 
+    wire           sm_tvalid; 
+    wire [31 :0]   sm_tdata; 
+    wire           sm_tlast;
+
+//--------------------------stream in---------------------------------
     
-//  AXI-Stream Interface
-    wire        ss_tvalid; 
-    wire [31:0] ss_tdata;
-    wire        ss_tlast;
-    wire        ss_tready; 
-    wire        sm_tready;
-    wire        sm_tvalid;
-    wire [31:0] sm_tdata;
-    wire        sm_tlast;
-    wire        axis_clk;
-    wire        axis_rst_n;  // Active Low (~wb_rst_i)
+    assign ss_tvalid = stream_in && wbs_cyc_i && wbs_stb_i ;
+    assign ss_tdata = wbs_dat_i;
+    //assign ss_tlast = ;
+    assign wbs_si_ack = ss_tready && ss_tvalid;
+    //assign wbs_si_dat = ; dont care
+
+//--------------------------stream out---------------------------------
+
+    assign sm_tready = stream_out && wbs_cyc_i && wbs_stb_i ;
+    assign wbs_so_ack = sm_tready && sm_tvalid;
+    assign wbs_so_dat = sm_tdata;
+
+//--------------------------select output---------------------------------
     
+    wire usr1;
+    wire [31: 0] usr2;
+    wire axis_clk;
+    wire axis_rst_n;
+    reg  temp1;
+    reg  [31: 0] temp2;
+    assign axis_clk = wb_clk_i;
+    assign axis_rst_n =  ~wb_rst_i;
+    assign wbs_ack_o = temp1;
+    assign wbs_dat_o = temp2;
+    always@(*) begin
+        if(fir_addr) begin
+            if(wbs_we_i) begin
+                if(stream_in) begin
+                    temp1 = wbs_si_ack;
+                    temp2 = 32'b0;
+                end
+                else begin
+                    temp1 = wbs_w_ack;
+                    temp2 = 32'b0;
+                end
+            end    
+            else begin
+                if(stream_out) begin
+                    temp1 = wbs_so_ack;
+                    temp2 = wbs_so_dat;
+                end
+                else begin
+                    temp1 = wbs_r_ack;
+                    temp2 = wbs_r_dat;
+                end
+            end
+        end
+        //user project
+        else begin
+            temp1 = usr1;
+            temp2 = usr2;
+        end
+    end
+
+/*--------------------------------------*/
+/* User project is instantiated  here   */
+/*--------------------------------------*/
     // ram for tap
     wire [3:0]  tap_WE;
     wire        tap_EN;
@@ -124,196 +237,105 @@ module user_project_wrapper #(
     wire [31:0] data_Di;
     wire [31:0] data_A;
     wire [31:0] data_Do;
+
+
+user_proj_exmem_fir mprj (
+`ifdef USE_POWER_PINS
+	.vccd1(vccd1),	// User area 1 1.8V power
+	.vssd1(vssd1),	// User area 1 digital ground
+`endif
+
+    .wb_clk_i(wb_clk_i),
+    .wb_rst_i(wb_rst_i),
+
+    // MGMT SoC Wishbone Slave
+
+    .wbs_cyc_i(wbs_cyc_i),
+    .wbs_stb_i(wbs_stb_i),
+    .wbs_we_i(wbs_we_i),
+    .wbs_sel_i(wbs_sel_i),
+    .wbs_adr_i(wbs_adr_i),
+    .wbs_dat_i(wbs_dat_i),
+    .wbs_ack_o(usr1),
+    .wbs_dat_o(usr2),
+
+    // Logic Analyzer
+
+    .la_data_in(la_data_in),
+    .la_data_out(la_data_out),
+    .la_oenb (la_oenb),
+
+    // IO Pads
+
+    .io_in (io_in),
+    .io_out(io_out),
+    .io_oeb(io_oeb),
+
+    // IRQ
+    .irq(user_irq)
+);
+
+//fir 
+fir fir1(
+    .axis_clk(axis_clk),
+    .axis_rst_n(axis_rst_n),
     
+    .awready(awready),
+    .wready(wready),
+    .awvalid(awvalid),
+    .awaddr(awaddr),
+    .wvalid(wvalid),
+    .wdata(wdata),
+    .arready(arready),
+    .rready(rready),
+    .arvalid(arvalid),
+    .araddr(araddr),
+    .rvalid(rvalid),
+    .rdata(rdata),
+
+    .ss_tvalid(ss_tvalid),
+    .ss_tdata(ss_tdata),
+    .ss_tlast(ss_tlast),
+    .ss_tready(ss_tready),
+    .sm_tready(sm_tready),
+    .sm_tvalid(sm_tvalid),
+    .sm_tdata(sm_tdata),
+    .sm_tlast(sm_tlast),
     
-    // WB-to-AXI
-    wire        axi_w_ack; // axilite WRITE
-    wire [31:0] axi_r_dat; // axilite READ data
-    wire        axi_r_ack; // axilite READ 
-    wire        axi_s_ack; // axis
-    wire [31:0] axi_m_dat; // axis data-out
-    wire        axi_m_ack; // axis
-    
-    wire [31:0] usr_dat_o;
-    wire        usr_ack_o;
-    
-    reg         tmp_wb_ack;
-    reg  [31:0] tmp_wb_dat;
-    
-//====================== WB Address Decode =========================
-    // User project memory starting:  0x3800_0000
-    // User project FIR base address: 0x3000_0000 
-    assign usr_decode = (wbs_adr_i[31:16] == 16'h3800)? 1'b1 : 1'b0; // Send to user project memory
-    assign fir_decode = (wbs_adr_i[31:16] == 16'h3000)? 1'b1 : 1'b0; // Send to FIR
-    assign fir_strin  = (fir_decode && wbs_adr_i[15:0] == 16'h0080)? 1'b1 : 1'b0;
-    assign fir_strout = (fir_decode && wbs_adr_i[15:0] == 16'h0084)? 1'b1 : 1'b0;
-    
-    assign wbs_ack_o = tmp_wb_ack; // ready
-    assign wbs_dat_o = tmp_wb_dat;
-    
-//------------------------- WB-to-AXI ------------------------------
-    // AXI WRITE 
-    assign awvalid   = fir_decode && (!fir_strin) && (!fir_strout) && wbs_cyc_i && wbs_stb_i && wbs_we_i; // address valid when processing(CYC)
-    assign wvalid    = fir_decode && (!fir_strin) && (!fir_strout) && wbs_cyc_i && wbs_stb_i && wbs_we_i; // data valid when strobe
-    assign awaddr    = wbs_adr_i; 
-    assign wdata     = wbs_dat_i;
-    assign axi_w_ack = wready && wvalid;
-    
-    // AXI READ
-    assign arvalid   = fir_decode && wbs_cyc_i && wbs_stb_i && (!wbs_we_i);
-    assign rready    = fir_decode && wbs_cyc_i && wbs_stb_i && (!wbs_we_i);
-    assign araddr    = wbs_adr_i;
-    assign axi_r_dat = rdata;
-    assign axi_r_ack = rvalid && rready;
-    
-    // Input FIR (Stream-in)
-    assign ss_tvalid = wbs_cyc_i && wbs_stb_i && fir_strin;
-    assign ss_tdata  = wbs_dat_i;
-    assign axi_s_ack = ss_tready;
-    
-    // FIR output (Stream-out)
-    assign sm_tready = wbs_cyc_i && wbs_stb_i && fir_strout;
-    assign axi_m_dat = sm_tdata;   // Y from FIR
-    assign axi_m_ack = sm_tvalid;
-    
-    assign axis_clk   = wb_clk_i; 
-    assign axis_rst_n = ~wb_rst_i; // WB: active high AXI: active low
-    
-    always @* begin
-        if (fir_decode) begin
-            if (wbs_we_i) begin // WRITE
-                if (wbs_adr_i[7:0] == 8'h80) begin // WRITE X (stream)
-                    tmp_wb_ack = axi_s_ack; // ss
-                    tmp_wb_dat = 32'dx;
-                end
-                else begin    // 0x40:TAP 0x10:data_length 0x00:ap_ctrl
-                    tmp_wb_ack = axi_w_ack; // AXI 
-                    tmp_wb_dat = 32'dx;
-                end
-            end
-            else begin          // READ
-                if (wbs_adr_i[7:0] == 8'h84) begin // READ Y (stream)
-                    tmp_wb_ack = axi_m_ack; // sm_tvalid
-                    tmp_wb_dat = axi_m_dat; // sm_tdata
-                end
-                else begin    // 0x40:TAP 0x00:ap_ctrl both using AXI
-                    tmp_wb_ack = axi_r_ack; 
-                    tmp_wb_dat = axi_r_dat;
-                end
-            end
-        end
-        else begin
-            tmp_wb_ack = usr_ack_o;
-            tmp_wb_dat = usr_dat_o;
-        end
-    end
+    .tap_WE(tap_WE),
+    .tap_Di(tap_Di),
+    .tap_Do(tap_Do),
+    .tap_EN(tap_EN),
+    .tap_A(tap_A),
 
-/*--------------------------------------*/
-/*  User project is instantiated here   */
-/*--------------------------------------*/
+    .data_A(data_A),
+    .data_WE(data_WE),
+    .data_Di(data_Di),
+    .data_Do(data_Do),
+    .data_EN(data_EN)
+);
 
-    user_proj_exmem_fir mprj (
-    `ifdef USE_POWER_PINS
-	    .vccd1(vccd1),	// User area 1 1.8V power
-        .vssd1(vssd1),	// User area 1 digital ground
-    `endif
+//tap
 
-        .wb_clk_i(wb_clk_i),
-        .wb_rst_i(wb_rst_i),
+bram11 tap(
+    .CLK(axis_clk),
+    .WE(tap_WE),
+    .Di(tap_Di),
+    .Do(tap_Do),
+    .EN(tap_EN),
+    .A(tap_A)
+);
 
-        // MGMT SoC Wishbone Slave
+//data
 
-        .wbs_cyc_i(wbs_cyc_i),
-        .wbs_stb_i(wbs_stb_i),
-        .wbs_we_i(wbs_we_i),
-        .wbs_sel_i(wbs_sel_i),
-        .wbs_adr_i(wbs_adr_i),
-        .wbs_dat_i(wbs_dat_i),
-        .wbs_ack_o(usr_ack_o), // take the WB_READY from user project FIR
-        .wbs_dat_o(usr_dat_o), // tale the output from user project FIR
-
-        // Logic Analyzer
-
-        .la_data_in(la_data_in),
-        .la_data_out(la_data_out),
-        .la_oenb (la_oenb),
-
-        // IO Pads
-
-        .io_in (io_in),
-        .io_out(io_out),
-        .io_oeb(io_oeb),
-
-        // IRQ
-        .irq(user_irq)
-    );
-
-/*--------------------------------------*/
-/*  Hardware FIR is instantiated here   */
-/*--------------------------------------*/
-
-    fir fir_hardware(
-        // AXI-lite
-        .awready(awready),
-        .wready(wready),
-        .awvalid(awvalid),
-        .awaddr(awaddr),
-        .wvalid(wvalid),
-        .wdata(wdata),
-        .arready(arready),
-        .rready(rready),
-        .arvalid(arvalid),
-        .araddr(araddr),
-        .rvalid(rvalid),
-        .rdata(rdata),
-        // AXI-Stream
-        .ss_tvalid(ss_tvalid),
-        .ss_tdata(ss_tdata),
-        .ss_tlast(ss_tlast),
-        .ss_tready(ss_tready),
-        .sm_tready(sm_tready),
-        .sm_tvalid(sm_tvalid),
-        .sm_tdata(sm_tdata),
-        .sm_tlast(sm_tlast),
-
-        // ram for tap
-        .tap_WE(tap_WE),
-        .tap_EN(tap_EN),
-        .tap_Di(tap_Di),
-        .tap_A(tap_A),
-        .tap_Do(tap_Do),
-
-        // ram for data
-        .data_WE(data_WE),
-        .data_EN(data_EN),
-        .data_Di(data_Di),
-        .data_A(data_A),
-        .data_Do(data_Do),
-
-        .axis_clk(axis_clk),
-        .axis_rst_n(axis_rst_n)
-
-    );
-    
-    bram11 tap_RAM (
-        .CLK(axis_clk),
-        .WE(tap_WE),
-        .EN(tap_EN),
-        .A(tap_A),
-        .Di(tap_Di),
-        .Do(tap_Do)
-    );
-
-    bram11 data_RAM (
-        .CLK(axis_clk),
-        .WE(data_WE),
-        .EN(data_EN),
-        .A(data_A),
-        .Di(data_Di),
-        .Do(data_Do)
-    );
-
-
+bram11 data(
+    .CLK(axis_clk),
+    .WE(data_WE),
+    .Di(data_Di),
+    .Do(data_Do),
+    .EN(data_EN),
+    .A(data_A)
+);
 endmodule	// user_project_wrapper
 
 `default_nettype wire
